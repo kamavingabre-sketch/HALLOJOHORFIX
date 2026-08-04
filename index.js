@@ -7,7 +7,7 @@
 import makeWASocket, {
   useMultiFileAuthState,
   DisconnectReason,
-  fetchLatestBaileysVersion,
+  fetchLatestWaWebVersion,
   makeCacheableSignalKeyStore,
   Browsers
 } from '@whiskeysockets/baileys';
@@ -399,9 +399,13 @@ async function startBot() {
   const { state, saveCreds } = await useMultiFileAuthState(CONFIG.AUTH_DIR);
   logger.info('AUTH', 'Auth state dimuat', CONFIG.AUTH_DIR);
 
-  // Fetch latest Baileys version
-  const { version, isLatest } = await fetchLatestBaileysVersion();
-  logger.info('VERSION', `Baileys v${version.join('.')}`, isLatest ? '(latest)' : '(outdated)');
+  // Fetch latest WA Web version (fetchLatestBaileysVersion() bisa mengembalikan
+  // versi basi meski isLatest:true di beberapa rilis rc13, yang menyebabkan
+  // WhatsApp menolak menyelesaikan linking meski kode pairing sudah dimasukkan
+  // -> muncul "Couldn't link device" di HP. fetchLatestWaWebVersion() mengambil
+  // versi WA Web yang benar-benar aktual. Lihat: WhiskeySockets/Baileys#2679
+  const { version } = await fetchLatestWaWebVersion({});
+  logger.info('VERSION', `WA Web v${version.join('.')}`, '(fetchLatestWaWebVersion)');
 
   // Create WA Socket
   const sock = makeWASocket({
