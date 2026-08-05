@@ -97,3 +97,7 @@ File yang perlu dicek: `handler.js`, `web.js`, `web-pages.js`, `web-excel.js`
 | `broadcast_queue` | Antrian dan histori broadcast |
 | `weather_broadcast_schedule` | Konfigurasi jadwal cuaca BMKG |
 | `umkm_binaan` | Data UMKM binaan kecamatan |
+| `berita_auto_schedule` | Konfigurasi kirim berita otomatis (portal.medan.go.id) |
+| `berita_posted` | Riwayat berita yang sudah dikirim (anti-dobel) |
+
+> 🆕 **Tabel berita** (fitur *Berita Otomatis*): jalankan ulang `supabase_schema.sql` di SQL Editor — perintah `CREATE TABLE IF NOT EXISTS` aman dijalankan berulang, tabel lama tidak terhapus.

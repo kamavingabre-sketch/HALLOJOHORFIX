@@ -10,8 +10,9 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
-import { queueFeedback, getLaporanGroups, getLivechatSessions, addLivechatMessage, closeLivechatSessionById, markLivechatRead, queueLivechatReply, addLaporanGroup, removeLaporanGroup, getGroupRouting, setGroupRouting, deleteLaporan, updateLaporanStatus, getLaporanById, getLaporanByJid, getAllLaporan, queueStatusNotif, getKegiatan, addKegiatan, deleteKegiatan, queueBroadcast, getBroadcastHistory, getBroadcastChannels, addBroadcastChannel, removeBroadcastChannel, getWeatherBroadcastConfig, setWeatherBroadcastConfig, getUmkm, addUmkm, updateUmkm, deleteUmkm, getIvaResults, getIvaStats } from './store.js';
+import { queueFeedback, getLaporanGroups, getLivechatSessions, addLivechatMessage, closeLivechatSessionById, markLivechatRead, queueLivechatReply, addLaporanGroup, removeLaporanGroup, getGroupRouting, setGroupRouting, deleteLaporan, updateLaporanStatus, getLaporanById, getLaporanByJid, getAllLaporan, queueStatusNotif, getKegiatan, addKegiatan, deleteKegiatan, queueBroadcast, getBroadcastHistory, getBroadcastChannels, addBroadcastChannel, removeBroadcastChannel, getWeatherBroadcastConfig, setWeatherBroadcastConfig, getUmkm, addUmkm, updateUmkm, deleteUmkm, getIvaResults, getIvaStats, getBeritaAutoConfig, setBeritaAutoConfig, getPostedBeritaIds, markBeritaPosted, countBeritaPosted, resetBeritaPosted, markBeritaChecked } from './store.js';
 import { scrapeMedanJohorCuacaHariIni, formatCuacaWhatsApp, BMKG_MEDAN_JOHOR_URL } from './bmkg-cuaca.js';
+import { getBeritaTerbaru, antrekanBeritaBaru, resolveRealUrl, PORTAL_BERITA_URL } from './berita-medan.js';
 import { KATEGORI_PENGADUAN } from './menu.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -190,7 +191,7 @@ input:focus{border-color:#0090c8;box-shadow:0 0 0 3px rgba(0,200,255,.1)}
   <p class="foot">Kecamatan Medan Johor — Sistem Pengaduan Digital</p>
 </div></body></html>`;
 
-const pageDashboard = (laporan, groups, routing = {}, kegiatan = [], bcChannels = [], bcHistory = [], weatherSchedule = {}, umkmList = []) => {
+const pageDashboard = (laporan, groups, routing = {}, kegiatan = [], bcChannels = [], bcHistory = [], weatherSchedule = {}, umkmList = [], beritaAuto = {}, beritaPostedCount = 0) => {
   const total = laporan.length;
   const now = new Date();
   const today = laporan.filter(l => new Date(l.tanggal).toDateString() === now.toDateString()).length;
@@ -351,6 +352,16 @@ const pageDashboard = (laporan, groups, routing = {}, kegiatan = [], bcChannels 
         `<option value="${esc(c.jid)}"${cuacaChSel === c.jid ? ' selected' : ''}>${esc(c.name)} (${esc(c.jid.split('@')[0])}…)</option>`
       ).join('')
     : '';
+  const beritaChSel = (beritaAuto.channelJid || '').trim();
+  const beritaChannelOpts = bcChannels.length
+    ? bcChannels.map(c =>
+        `<option value="${esc(c.jid)}"${beritaChSel === c.jid ? ' selected' : ''}>${esc(c.name)} (${esc(c.jid.split('@')[0])}…)</option>`
+      ).join('')
+    : '';
+  const beritaInterval = parseInt(beritaAuto.intervalMinutes, 10) || 30;
+  const beritaLastCheck = beritaAuto.lastCheckAt
+    ? new Date(beritaAuto.lastCheckAt).toLocaleString('id-ID', { timeZone: 'Asia/Jakarta', day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }) + ' WIB'
+    : '—';
 
 
   return `<!DOCTYPE html>
@@ -964,6 +975,47 @@ textarea.kg-input{resize:vertical;min-height:72px}
         <div style="font-size:11px;color:var(--muted);margin-bottom:10px">Otomatis terakhir: <span id="cuaca-last-sent">${esc(weatherSchedule.lastSentDate || '—')}</span></div>
         <div id="cuaca-status" class="bc-ch-status" style="display:none;margin-bottom:10px"></div>
         <pre id="cuaca-preview" style="display:none;white-space:pre-wrap;font-size:12px;font-family:'JetBrains Mono',monospace;background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:14px;color:var(--text2);max-height:280px;overflow-y:auto;margin:0"></pre>
+      </div>
+
+      <div class="bc-channel-box" style="border-color:rgba(52,211,153,.3)">
+        <div class="bc-channel-title">📰 Berita Otomatis — Portal Pemko Medan</div>
+        <div style="font-size:12px;color:var(--text2);margin-bottom:12px;line-height:1.75">
+          Sumber: <a href="${PORTAL_BERITA_URL}" target="_blank" rel="noopener noreferrer" style="color:var(--cyan)">${PORTAL_BERITA_URL}</a><br>
+          Bot memeriksa <b>berita baru</b> secara berkala lalu mengirimkannya (judul, tanggal, ringkasan, foto &amp; tautan)
+          ke saluran yang dipilih. Berita yang sudah terkirim dicatat agar <b>tidak dikirim dua kali</b>.
+          Jika portal diblokir proteksi Cloudflare dari server, bot otomatis memakai <i>Google News RSS</i> sebagai cadangan.
+        </div>
+        <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:12px">
+          <label class="bc-label" style="margin:0">Saluran berita:</label>
+          <select class="bc-select" id="berita-bc-target" style="min-width:220px;flex:1">
+            <option value="">— Pilih saluran —</option>
+            ${beritaChannelOpts}
+          </select>
+        </div>
+        <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:12px">
+          <label class="bc-label" style="margin:0">Cek setiap:</label>
+          <select class="bc-select" id="berita-interval" style="min-width:160px">
+            ${[15, 30, 60, 120, 360, 720].map(m => `<option value="${m}"${beritaInterval === m ? ' selected' : ''}>${m < 60 ? m + ' menit' : (m / 60) + ' jam'}</option>`).join('')}
+          </select>
+        </div>
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text2);margin-bottom:12px;cursor:pointer">
+          <input type="checkbox" id="berita-auto-enabled" ${beritaAuto.enabled ? 'checked' : ''} style="width:16px;height:16px">
+          <span>Kirim otomatis berita baru ke saluran di atas</span>
+        </label>
+        <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:8px">
+          <button type="button" class="ref-btn" onclick="saveBeritaSchedule()">💾 Simpan pengaturan</button>
+          <button type="button" class="ref-btn" onclick="cekBeritaSekarang()" id="berita-cek-btn">🔍 Cek berita sekarang</button>
+          <button type="button" class="bc-send-btn" style="margin:0;padding:9px 18px;font-size:13px" onclick="kirimBeritaTerbaru()" id="berita-kirim-btn">📤 Kirim berita terbaru sekarang</button>
+          <button type="button" class="ref-btn" style="border-color:rgba(255,107,107,.35);color:#ff9c9c" onclick="resetRiwayatBerita()">♻️ Reset riwayat kirim</button>
+        </div>
+        <div style="font-size:11px;color:var(--muted);margin-bottom:4px">
+          Pemeriksaan terakhir: <span id="berita-last-check">${esc(beritaLastCheck)}</span>
+          &nbsp;·&nbsp; Sumber terakhir: <span id="berita-last-source">${esc(beritaAuto.lastSource || '—')}</span>
+          &nbsp;·&nbsp; Total berita terkirim: <span id="berita-posted-count">${beritaPostedCount}</span>
+        </div>
+        ${beritaAuto.lastError ? `<div style="font-size:11px;color:#ff9c9c;margin-bottom:10px">⚠️ Error terakhir: ${esc(beritaAuto.lastError)}</div>` : ''}
+        <div id="berita-status" class="bc-ch-status" style="display:none;margin-bottom:10px"></div>
+        <div id="berita-list" style="display:none;flex-direction:column;gap:8px;margin-top:4px"></div>
       </div>
 
       <!-- ─ Saluran Management ─ -->
@@ -2074,6 +2126,115 @@ async function queueCuacaBmkgSekarang() {
   }
 }
 
+// ── Berita Otomatis ──────────────────────────────────────
+
+function beritaSetStatus(msg, cls) {
+  const st = document.getElementById('berita-status');
+  st.textContent = msg;
+  st.className = 'bc-ch-status ' + cls;
+  st.style.display = 'block';
+}
+
+async function saveBeritaSchedule() {
+  const enabled = document.getElementById('berita-auto-enabled').checked;
+  const channelJid = document.getElementById('berita-bc-target').value.trim();
+  const intervalMinutes = parseInt(document.getElementById('berita-interval').value, 10) || 30;
+  if (enabled && !channelJid) {
+    beritaSetStatus('⚠️ Pilih saluran agar pengiriman otomatis bisa jalan.', 'err');
+    return;
+  }
+  try {
+    const res = await fetch('/api/berita/schedule', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled, channelJid, intervalMinutes })
+    });
+    const json = await res.json();
+    if (!json.ok) throw new Error(json.error || 'Gagal simpan');
+    beritaSetStatus('✅ Pengaturan berita otomatis disimpan.', 'ok');
+  } catch (e) {
+    beritaSetStatus('❌ ' + e.message, 'err');
+  }
+}
+
+function renderBeritaList(items) {
+  const box = document.getElementById('berita-list');
+  if (!items || !items.length) { box.style.display = 'none'; return; }
+  box.innerHTML = items.map(it => \`
+    <div style="background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:10px 14px;font-size:12px;line-height:1.6">
+      <div style="font-weight:600;color:var(--text)">\${esc(it.judul)}</div>
+      <div style="color:var(--muted);font-size:11px;margin-top:2px">
+        \${it.tanggalWib ? '🗓️ ' + esc(it.tanggalWib) : ''}\${it.kategori ? ' · 🏷️ ' + esc(it.kategori) : ''}\${it.sudahTerkirim ? ' · ✅ sudah terkirim' : ' · 🆕 <b style="color:#6ee7b7">baru</b>'}
+      </div>
+      \${it.url ? \`<a href="\${esc(it.url)}" target="_blank" rel="noopener noreferrer" style="color:var(--cyan);font-size:11px;word-break:break-all">🔗 \${esc(it.url.length > 80 ? it.url.slice(0, 80) + '…' : it.url)}</a>\` : ''}
+    </div>\`).join('');
+  box.style.display = 'flex';
+}
+
+async function cekBeritaSekarang() {
+  const btn = document.getElementById('berita-cek-btn');
+  btn.disabled = true;
+  beritaSetStatus('⏳ Memeriksa portal berita… (bisa sampai ±30 detik)', 'ok');
+  try {
+    const res = await fetch('/api/berita/check');
+    const json = await res.json();
+    if (!json.ok) throw new Error(json.error || 'Gagal memeriksa');
+    let msg = \`✅ \${json.total} berita ditemukan · sumber: <b>\${esc(json.source)}</b> · \${json.baru} belum terkirim\`;
+    if (json.note) msg += \`<br><span style="color:#fbbf24">⚠️ \${esc(json.note)}</span>\`;
+    const st = document.getElementById('berita-status');
+    st.innerHTML = msg;
+    st.className = 'bc-ch-status ok';
+    st.style.display = 'block';
+    renderBeritaList(json.items);
+  } catch (e) {
+    beritaSetStatus('❌ ' + e.message, 'err');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function kirimBeritaTerbaru() {
+  const btn = document.getElementById('berita-kirim-btn');
+  const channelJid = document.getElementById('berita-bc-target').value.trim();
+  if (!channelJid) {
+    beritaSetStatus('⚠️ Pilih saluran tujuan dulu.', 'err');
+    return;
+  }
+  btn.disabled = true;
+  beritaSetStatus('⏳ Mengambil berita terbaru & mengantre broadcast…', 'ok');
+  try {
+    const res = await fetch('/api/berita/send-latest', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ channelJid })
+    });
+    const json = await res.json();
+    if (!json.ok) throw new Error(json.error || 'Gagal');
+    beritaSetStatus('✅ ' + (json.message || 'Diantrekan.'), 'ok');
+    if (json.items) renderBeritaList(json.items);
+    setTimeout(() => refreshBcHistory(), 2500);
+  } catch (e) {
+    beritaSetStatus('❌ ' + e.message, 'err');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function resetRiwayatBerita() {
+  if (!confirm('Hapus seluruh riwayat berita terkirim?\n\nSetelah direset, berita yang sudah pernah dikirim BISA dikirim ulang jika masih muncul di portal.\nLanjutkan?')) return;
+  try {
+    const res = await fetch('/api/berita/reset', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    const json = await res.json();
+    if (!json.ok) throw new Error(json.error || 'Gagal');
+    beritaSetStatus('✅ Riwayat kirim berita berhasil direset.', 'ok');
+    document.getElementById('berita-posted-count').textContent = '0';
+  } catch (e) {
+    beritaSetStatus('❌ ' + e.message, 'err');
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 async function lookupChannelJid() {
   const inviteInput = document.getElementById('bc-invite-input');
   const jidInput    = document.getElementById('bc-jid-input');
@@ -2326,7 +2487,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (path_ === '/') {
-    const [laporan, groups, routing, kegiatan, bcChannels, bcHistory, weatherSchedule, umkmList] = await Promise.all([
+    const [laporan, groups, routing, kegiatan, bcChannels, bcHistory, weatherSchedule, umkmList, beritaAuto, beritaPostedCount] = await Promise.all([
       Promise.resolve(getLaporan()),
       getLaporanGroups(),
       getGroupRouting(),
@@ -2334,9 +2495,11 @@ const server = http.createServer(async (req, res) => {
       getBroadcastChannels(),
       getBroadcastHistory(30),
       getWeatherBroadcastConfig(),
-      getUmkm()
+      getUmkm(),
+      getBeritaAutoConfig(),
+      countBeritaPosted()
     ]);
-    return send(200, pageDashboard(laporan, groups, routing, kegiatan, bcChannels, bcHistory, weatherSchedule, umkmList));
+    return send(200, pageDashboard(laporan, groups, routing, kegiatan, bcChannels, bcHistory, weatherSchedule, umkmList, beritaAuto, beritaPostedCount));
   }
 
   // ── Halaman IVA Skrining ──
@@ -3103,7 +3266,7 @@ function copyIt() {
     }
   }
 
-  // ── API: Berita Pemko Medan (portal.medan.go.id/berita) ──
+  // ── API: Cuaca BMKG Kec. Medan Johor ──
   if (path_ === '/api/cuaca-medanjohor/preview' && req.method === 'GET') {
     try {
       const data = await scrapeMedanJohorCuacaHariIni();
@@ -3144,6 +3307,78 @@ function copyIt() {
       const pesan = formatCuacaWhatsApp(data);
       await queueBroadcast({ channelJid, pesan: pesan.trim() });
       return send(200, JSON.stringify({ ok: true, message: 'Prakiraan cuaca diantrekan. Bot akan mengirim sebentar lagi.' }), 'application/json');
+    } catch (err) {
+      return send(500, JSON.stringify({ ok: false, error: err.message }), 'application/json');
+    }
+  }
+
+  // ── API: Berita Otomatis — Portal Pemko Medan ──
+  if (path_ === '/api/berita/schedule' && req.method === 'GET') {
+    try {
+      const cfg = await getBeritaAutoConfig();
+      return send(200, JSON.stringify({ ok: true, ...cfg, postedCount: await countBeritaPosted() }), 'application/json');
+    } catch (err) {
+      return send(500, JSON.stringify({ ok: false, error: err.message }), 'application/json');
+    }
+  }
+
+  if (path_ === '/api/berita/schedule' && req.method === 'POST') {
+    try {
+      const body = await parseJSONBody(req);
+      await setBeritaAutoConfig({
+        enabled: !!body.enabled,
+        channelJid: (body.channelJid || '').trim(),
+        intervalMinutes: body.intervalMinutes,
+      });
+      return send(200, JSON.stringify({ ok: true }), 'application/json');
+    } catch (err) {
+      return send(500, JSON.stringify({ ok: false, error: err.message }), 'application/json');
+    }
+  }
+
+  if (path_ === '/api/berita/check' && req.method === 'GET') {
+    try {
+      const hasil = await getBeritaTerbaru();
+      const postedIds = new Set(await getPostedBeritaIds());
+      // Pecahkan link Google → link portal asli (maks 3 item baru teratas, selebihnya tetap link Google)
+      const baruTeratas = hasil.items.filter(it => !postedIds.has(it.id)).slice(-3);
+      await Promise.all(baruTeratas.map(async it => { it.url = await resolveRealUrl(it.url, it.judul); }));
+      const items = hasil.items.slice(0, 8).map(it => ({
+        judul: it.judul, url: it.url, tanggalWib: it.tanggalWib,
+        kategori: it.kategori, gambarUrl: it.gambarUrl,
+        sudahTerkirim: postedIds.has(it.id),
+      }));
+      const baru = hasil.items.filter(it => !postedIds.has(it.id)).length;
+      await markBeritaChecked({ source: hasil.source, error: null });
+      return send(200, JSON.stringify({ ok: true, source: hasil.source, note: hasil.note || null, total: hasil.items.length, baru, items }), 'application/json');
+    } catch (err) {
+      await markBeritaChecked({ source: null, error: err.message }).catch(() => {});
+      return send(500, JSON.stringify({ ok: false, error: err.message }), 'application/json');
+    }
+  }
+
+  if (path_ === '/api/berita/send-latest' && req.method === 'POST') {
+    try {
+      const body = await parseJSONBody(req);
+      const channelJid = (body.channelJid || '').trim();
+      if (!channelJid) return send(400, JSON.stringify({ ok: false, error: 'Pilih saluran tujuan dulu.' }), 'application/json');
+      const r = await antrekanBeritaBaru({ channelJid, forceLatest: true });
+      await markBeritaChecked({ source: r.source, error: null });
+      return send(200, JSON.stringify({
+        ok: true,
+        message: r.queued ? 'Berita terbaru diantrekan ke saluran. Bot mengirim dalam beberapa detik.' : 'Tidak ada berita ditemukan.',
+        source: r.source, note: r.note,
+        items: r.items.map(it => ({ judul: it.judul, url: it.url, tanggalWib: it.tanggalWib, kategori: it.kategori, sudahTerkirim: true })),
+      }), 'application/json');
+    } catch (err) {
+      return send(500, JSON.stringify({ ok: false, error: err.message }), 'application/json');
+    }
+  }
+
+  if (path_ === '/api/berita/reset' && req.method === 'POST') {
+    try {
+      const okReset = await resetBeritaPosted();
+      return send(okReset ? 200 : 500, JSON.stringify({ ok: okReset, error: okReset ? undefined : 'Gagal menghapus riwayat' }), 'application/json');
     } catch (err) {
       return send(500, JSON.stringify({ ok: false, error: err.message }), 'application/json');
     }

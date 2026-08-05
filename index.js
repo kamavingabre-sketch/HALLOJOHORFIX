@@ -19,8 +19,10 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 import { handleMessage } from './handler.js';
-import { getPendingFeedbacks, markFeedbackDone, getPendingLivechatReplies, markLivechatReplyDone, addLivechatMessage, closeLivechatSession, getPendingStatusNotifs, markStatusNotifDone, getPendingBroadcasts, markBroadcastDone, queueBroadcast, getWeatherBroadcastConfig, markWeatherBroadcastSent } from './store.js';
+import { getPendingFeedbacks, markFeedbackDone, getPendingLivechatReplies, markLivechatReplyDone, addLivechatMessage, closeLivechatSession, getPendingStatusNotifs, markStatusNotifDone, getPendingBroadcasts, markBroadcastDone, queueBroadcast, getWeatherBroadcastConfig, markWeatherBroadcastSent, getBeritaAutoConfig, markBeritaChecked } from './store.js';
 import { scrapeMedanJohorCuacaHariIni, formatCuacaWhatsApp } from './bmkg-cuaca.js';
+import { antrekanBeritaBaru } from './berita-medan.js';
+import axios from 'axios';
 import logger from './logger.js';
 
 // ─── Configuration ────────────────────────────────────────
@@ -294,19 +296,41 @@ function startBroadcastWorker(sock) {
         const mediaPath = bc.mediaFilename
           ? path.join(__dirname, 'data', 'broadcast_media', bc.mediaFilename)
           : null;
-        const hasMedia = mediaPath && fs.existsSync(mediaPath);
+        let mediaBuffer = null;
+        let mediaMime = bc.mediaMime || '';
+        if (mediaPath && fs.existsSync(mediaPath)) {
+          mediaBuffer = fs.readFileSync(mediaPath);
+        } else if (bc.mediaUrl) {
+          // Media dari URL eksternal (mis. foto berita portal) — unduh dulu
+          try {
+            const r = await axios.get(bc.mediaUrl, {
+              responseType: 'arraybuffer', timeout: 25000,
+              headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36' },
+              maxContentLength: 12 * 1024 * 1024,
+              validateStatus: () => true,
+            });
+            if (r.status === 200 && r.data?.length) {
+              mediaBuffer = Buffer.from(r.data);
+              mediaMime = (r.headers['content-type'] || mediaMime || 'image/jpeg').split(';')[0].trim();
+            } else {
+              logger.warn('BROADCAST', `Unduh mediaUrl gagal (HTTP ${r.status}), kirim teks saja`);
+            }
+          } catch (dlErr) {
+            logger.warn('BROADCAST', 'Unduh mediaUrl error, kirim teks saja', dlErr.message);
+          }
+        }
+        const hasMedia = !!mediaBuffer;
 
         // Saluran (@newsletter) dan grup: Baileys memakai sendMessage; relayMessage mengode plaintext untuk newsletter.
         const sendFn = (payload) => sock.sendMessage(jid, payload);
 
         if (hasMedia) {
-          const mediaBuffer = fs.readFileSync(mediaPath);
-          const isVideo = (bc.mediaMime || '').startsWith('video/');
+          const isVideo = (mediaMime || '').startsWith('video/');
           try {
             if (isVideo) {
-              await sendFn({ video: mediaBuffer, caption: bc.pesan || '', mimetype: bc.mediaMime || 'video/mp4' });
+              await sendFn({ video: mediaBuffer, caption: bc.pesan || '', mimetype: mediaMime || 'video/mp4' });
             } else {
-              await sendFn({ image: mediaBuffer, caption: bc.pesan || '', mimetype: bc.mediaMime || 'image/jpeg' });
+              await sendFn({ image: mediaBuffer, caption: bc.pesan || '', mimetype: mediaMime || 'image/jpeg' });
             }
           } catch (mediaErr) {
             if (isNewsletter) {
@@ -326,7 +350,7 @@ function startBroadcastWorker(sock) {
         }
 
         await markBroadcastDone(bc.id, 'sent');
-        logger.success('BROADCAST', `Broadcast terkirim → ${jid} ${isNewsletter ? '[newsletter]' : '[grup]'}`, bc.pesan?.substring(0, 40) || `[${bc.mediaMime}]`);
+        logger.success('BROADCAST', `Broadcast terkirim → ${jid} ${isNewsletter ? '[newsletter]' : '[grup]'}`, bc.pesan?.substring(0, 40) || `[${mediaMime}]`);
 
       } catch (err) {
         await markBroadcastDone(bc.id, 'failed', err.message);
@@ -355,6 +379,34 @@ function wibTimeParts() {
     if (type !== 'literal') parts[type] = value;
   }
   return parts;
+}
+
+// ─── Berita Auto Broadcast ────────────────────────────────
+// Cek berita baru di portal.medan.go.id/berita setiap N menit (atur di dashboard),
+// antrekan broadcast ke saluran yang dipilih. Riwayat kirim disimpan di Supabase
+// (tabel berita_posted) agar tidak ada berita yang dikirim dua kali.
+function startBeritaScheduler() {
+  let busy = false;
+  setInterval(async () => {
+    if (busy) return;
+    let cfg;
+    try { cfg = await getBeritaAutoConfig(); } catch { return; }
+    if (!cfg.enabled || !cfg.channelJid) return;
+    const intervalMs = (cfg.intervalMinutes || 30) * 60_000;
+    if (cfg.lastCheckAt && Date.now() - new Date(cfg.lastCheckAt).getTime() < intervalMs) return;
+    busy = true;
+    try {
+      const r = await antrekanBeritaBaru({ channelJid: cfg.channelJid });
+      await markBeritaChecked({ source: r.source, error: null });
+      if (r.queued > 0) logger.info('BERITA', `Siklus selesai: ${r.queued} berita baru diantrekan`, `sumber: ${r.source}`);
+    } catch (err) {
+      await markBeritaChecked({ source: null, error: err.message });
+      logger.warn('BERITA', 'Siklus cek berita gagal (dicoba lagi jadwal berikutnya)', err.message);
+    } finally {
+      busy = false;
+    }
+  }, 60_000);
+  logger.info('BERITA', '📰 Penjadwal berita otomatis aktif (interval diatur di dashboard)');
 }
 
 /** Antrian teks prakiraan BMKG setiap hari ±00:00 WIB (jendela menit ke-0–12, cek tiap ~40 dtk). */
@@ -603,6 +655,7 @@ process.on('SIGTERM', () => {
 
 // ─── Run ──────────────────────────────────────────────────
 startWeatherScheduler();
+startBeritaScheduler();
 startBot().catch(err => {
   logger.error('BOOT', 'Gagal menjalankan bot', err.message);
   console.error(err);

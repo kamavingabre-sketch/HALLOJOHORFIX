@@ -117,6 +117,28 @@ CREATE TABLE IF NOT EXISTS weather_broadcast_schedule (
 INSERT INTO weather_broadcast_schedule (id) VALUES (1)
   ON CONFLICT (id) DO NOTHING;
 
+-- ── Berita Auto Broadcast (portal.medan.go.id/berita) ─────────
+CREATE TABLE IF NOT EXISTS berita_auto_schedule (
+  id               INTEGER PRIMARY KEY DEFAULT 1,
+  enabled          BOOLEAN DEFAULT FALSE,
+  channel_jid      TEXT DEFAULT '',
+  interval_minutes INTEGER DEFAULT 30,
+  last_check_at    TIMESTAMPTZ,
+  last_source      TEXT,
+  last_error       TEXT
+);
+INSERT INTO berita_auto_schedule (id) VALUES (1)
+  ON CONFLICT (id) DO NOTHING;
+
+-- Riwayat berita yang sudah dikirim (anti dobel)
+CREATE TABLE IF NOT EXISTS berita_posted (
+  id        TEXT PRIMARY KEY,
+  judul     TEXT,
+  url       TEXT,
+  posted_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_berita_posted_at ON berita_posted (posted_at DESC);
+
 -- ── UMKM Binaan ───────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS umkm_binaan (
   id         TEXT PRIMARY KEY,

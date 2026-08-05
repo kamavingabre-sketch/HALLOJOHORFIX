@@ -5,6 +5,15 @@
 
 import { createClient } from '@supabase/supabase-js';
 
+// Node < 22 tidak punya WebSocket native — supabase realtime butuh ini.
+// Fallback ke paket 'ws' bila tersedia (Node 22+ otomatis pakai native).
+if (typeof globalThis.WebSocket === 'undefined') {
+  try {
+    const { default: ws } = await import('ws');
+    globalThis.WebSocket = ws;
+  } catch { /* biarkan supabase melempar error aslinya */ }
+}
+
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY; // gunakan service_role key
 
@@ -396,6 +405,63 @@ export const setWeatherBroadcastConfig = async ({ enabled, channelJid }) => {
 export const markWeatherBroadcastSent = async (wibYmd) => {
   const { error } = await supabase.from('weather_broadcast_schedule').update({ last_sent_date: wibYmd }).eq('id', 1);
   if (error) logErr('markWeatherBroadcastSent', error);
+};
+
+// ══════════════════════════════════════════════════════════
+//   BERITA AUTO BROADCAST (portal.medan.go.id)
+// ══════════════════════════════════════════════════════════
+
+export const getBeritaAutoConfig = async () => {
+  const { data, error } = await supabase.from('berita_auto_schedule').select('*').eq('id', 1).single();
+  if (error) return { enabled: false, channelJid: '', intervalMinutes: 30, lastCheckAt: null, lastSource: null, lastError: null };
+  return {
+    enabled: !!data.enabled,
+    channelJid: (data.channel_jid || '').trim(),
+    intervalMinutes: Math.max(5, parseInt(data.interval_minutes, 10) || 30),
+    lastCheckAt: data.last_check_at || null,
+    lastSource: data.last_source || null,
+    lastError: data.last_error || null,
+  };
+};
+
+export const setBeritaAutoConfig = async ({ enabled, channelJid, intervalMinutes }) => {
+  const patch = { id: 1, enabled: Boolean(enabled), channel_jid: (channelJid || '').trim() };
+  if (intervalMinutes !== undefined) {
+    patch.interval_minutes = Math.min(1440, Math.max(5, parseInt(intervalMinutes, 10) || 30));
+  }
+  const { error } = await supabase.from('berita_auto_schedule').upsert(patch);
+  if (error) logErr('setBeritaAutoConfig', error);
+};
+
+export const markBeritaChecked = async ({ source = null, error: errMsg = null } = {}) => {
+  const { error } = await supabase.from('berita_auto_schedule')
+    .update({ last_check_at: new Date().toISOString(), last_source: source, last_error: errMsg })
+    .eq('id', 1);
+  if (error) logErr('markBeritaChecked', error);
+};
+
+export const getPostedBeritaIds = async (limit = 500) => {
+  const { data, error } = await supabase.from('berita_posted').select('id').order('posted_at', { ascending: false }).limit(limit);
+  if (error) { logErr('getPostedBeritaIds', error); return []; }
+  return (data || []).map(r => r.id);
+};
+
+export const markBeritaPosted = async (id, judul = '', url = '') => {
+  const { error } = await supabase.from('berita_posted')
+    .upsert({ id, judul: (judul || '').slice(0, 300), url: (url || '').slice(0, 500) });
+  if (error) logErr('markBeritaPosted', error);
+};
+
+export const countBeritaPosted = async () => {
+  const { count, error } = await supabase.from('berita_posted').select('*', { count: 'exact', head: true });
+  if (error) { logErr('countBeritaPosted', error); return 0; }
+  return count || 0;
+};
+
+export const resetBeritaPosted = async () => {
+  const { error } = await supabase.from('berita_posted').delete().neq('id', '');
+  if (error) { logErr('resetBeritaPosted', error); return false; }
+  return true;
 };
 
 // ══════════════════════════════════════════════════════════
