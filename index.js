@@ -2,26 +2,36 @@
 // ║     WhatsApp Bot - Layanan Kecamatan Medan Johor         ║
 // ║     Powered by Baileys v6.5.0 (Stable) + Node.js         ║
 // ║     Author: Bot Pelayanan Digital                        ║
+// ║     NOTE: Gunakan dengan "node index-v6-cjs.cjs"         ║
 // ╚══════════════════════════════════════════════════════════╝
 
-import makeWASocket, {
-  useSingleFileAuthState,
-  DisconnectReason,
-  makeCacheableSignalKeyStore
-} from '@whiskeysockets/baileys';
-import { Boom } from '@hapi/boom';
-import pino from 'pino';
-import readline from 'readline';
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-import { handleMessage } from './handler.js';
-import { getPendingFeedbacks, markFeedbackDone, getPendingLivechatReplies, markLivechatReplyDone, addLivechatMessage, closeLivechatSession, getPendingStatusNotifs, markStatusNotifDone, getPendingBroadcasts, markBroadcastDone, queueBroadcast, getWeatherBroadcastConfig, markWeatherBroadcastSent, getBeritaAutoConfig, markBeritaChecked } from './store.js';
-import { scrapeMedanJohorCuacaHariIni, formatCuacaWhatsApp } from './bmkg-cuaca.js';
-import { antrekanBeritaBaru } from './berita-medan.js';
-import axios from 'axios';
-import logger from './logger.js';
+const { 
+  useSingleFileAuthState, 
+  makeWASocket, 
+  DisconnectReason, 
+  makeCacheableSignalKeyStore,
+  Boom 
+} = require('@whiskeysockets/baileys');
+
+const { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync } = require('fs');
+const { join, dirname } = require('path');
+const { fileURLToPath } = require('url');
+const { createInterface } = require('readline');
+const axios = require('axios');
+
+// Import lokal (harus menggunakan .js extension)
+const { handleMessage } = require('./handler.js');
+const { 
+  getPendingFeedbacks, markFeedbackDone, getPendingLivechatReplies, markLivechatReplyDone, 
+  addLivechatMessage, closeLivechatSession, getPendingStatusNotifs, markStatusNotifDone, 
+  getPendingBroadcasts, markBroadcastDone, queueBroadcast, getWeatherBroadcastConfig, 
+  markWeatherBroadcastSent, getBeritaAutoConfig, markBeritaChecked 
+} = require('./store.js');
+const { scrapeMedanJohorCuacaHariIni, formatCuacaWhatsApp } = require('./bmkg-cuaca.js');
+const { antrekanBeritaBaru } = require('./berita-medan.js');
+const logger = require('./logger.js');
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // ─── Configuration ────────────────────────────────────────
 const CONFIG = {
@@ -31,13 +41,13 @@ const CONFIG = {
   MAX_RECONNECT_ATTEMPTS: 10,
 };
 
-// Silent pino logger (supaya tidak flood console)
-const pinoLogger = pino({ level: 'silent' });
+// Silent pino logger
+const pinoLogger = require('pino')({ level: 'silent' });
 
 // ─── Readline Helper ──────────────────────────────────────
 const question = (prompt) => {
   return new Promise(resolve => {
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
     rl.question(prompt, answer => {
       rl.close();
       resolve(answer.trim());
@@ -52,18 +62,16 @@ const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 let reconnectCount = 0;
 
 // ─── Restore Auth dari Environment Variable ───────────────
-// Dipakai untuk Railway free plan (tanpa persistent volume).
-// Set env var AUTH_CREDS dengan output dari script export-auth.js
 function restoreAuthFromEnv() {
   const encoded = process.env.AUTH_CREDS;
   if (!encoded) return;
   try {
     const files = JSON.parse(Buffer.from(encoded, 'base64').toString('utf8'));
-    if (!fs.existsSync(CONFIG.AUTH_DIR)) {
-      fs.mkdirSync(CONFIG.AUTH_DIR, { recursive: true });
+    if (!existsSync(CONFIG.AUTH_DIR)) {
+      mkdirSync(CONFIG.AUTH_DIR, { recursive: true });
     }
     for (const [filename, content] of Object.entries(files)) {
-      fs.writeFileSync(
+      writeFileSync(
         `${CONFIG.AUTH_DIR}/${filename}`,
         typeof content === 'string' ? content : JSON.stringify(content),
         'utf8'
@@ -76,14 +84,12 @@ function restoreAuthFromEnv() {
 }
 
 // ─── Feedback Worker ──────────────────────────────────────
-// Poll feedback_queue.json setiap 5 detik, kirim WA ke pelapor
 let feedbackInterval = null;
 let livechatReplyInterval = null;
 let statusNotifInterval = null;
 let broadcastInterval = null;
 
 function startFeedbackWorker(sock) {
-  // Bersihkan interval lama jika ada (reconnect)
   if (feedbackInterval) clearInterval(feedbackInterval);
 
   feedbackInterval = setInterval(async () => {
@@ -102,16 +108,14 @@ function startFeedbackWorker(sock) {
           `${fb.pesan}\n\n` +
           `_Terima kasih telah menggunakan layanan Hallo Johor_ 🏙️`;
 
-        if (fb.fotoPath && fs.existsSync(fb.fotoPath)) {
-          // Kirim pesan dengan foto
-          const imgBuffer = fs.readFileSync(fb.fotoPath);
+        if (fb.fotoPath && existsSync(fb.fotoPath)) {
+          const imgBuffer = readFileSync(fb.fotoPath);
           await sock.sendMessage(jid, {
             image: imgBuffer,
             caption: headerText,
             mimetype: 'image/jpeg',
           });
         } else {
-          // Kirim teks saja
           await sock.sendMessage(jid, { text: headerText });
         }
 
@@ -123,7 +127,6 @@ function startFeedbackWorker(sock) {
         logger.error('FEEDBACK', `Gagal kirim balasan ke ${fb.pelapor}`, err.message);
       }
 
-      // Delay antar pesan agar tidak spam
       await delay(1500);
     }
   }, 5000);
@@ -132,8 +135,6 @@ function startFeedbackWorker(sock) {
 }
 
 // ─── Status Notif Worker ───────────────────────────────────
-// Poll status_notif_queue.json setiap 5 detik
-// Kirim notifikasi WA otomatis ke pelapor saat admin ubah status
 function startStatusNotifWorker(sock) {
   if (statusNotifInterval) clearInterval(statusNotifInterval);
 
@@ -185,7 +186,6 @@ function startStatusNotifWorker(sock) {
 }
 
 // ─── LiveChat Reply Worker ─────────────────────────────────
-// Poll livechat_replies.json setiap 2 detik — near-instant delivery
 function startLivechatReplyWorker(sock) {
   if (livechatReplyInterval) clearInterval(livechatReplyInterval);
 
@@ -206,14 +206,14 @@ function startLivechatReplyWorker(sock) {
       }
       await delay(300);
     }
-  }, 2000); // 2 detik untuk near-instant delivery
+  }, 2000);
 
-  // Worker untuk menutup sesi yang di-close dari dashboard
+  // Worker untuk menutup sesi
   setInterval(() => {
     try {
       const closedFile = './data/livechat_close_queue.json';
-      if (!fs.existsSync(closedFile)) return;
-      const data = JSON.parse(fs.readFileSync(closedFile, 'utf8'));
+      if (!existsSync(closedFile)) return;
+      const data = JSON.parse(readFileSync(closedFile, 'utf8'));
       const pending = (data.queue || []).filter(c => c.status === 'pending');
       if (!pending.length) return;
       pending.forEach(async (c) => {
@@ -221,9 +221,8 @@ function startLivechatReplyWorker(sock) {
           const jid = c.jid.includes('@') ? c.jid : `${c.jid}@s.whatsapp.net`;
           await sock.sendMessage(jid, { text: `✅ Sesi LiveChat Anda telah ditutup oleh admin.\n\nTerima kasih! Ketik *menu* untuk kembali ke menu utama.` });
           c.status = 'done';
-          fs.writeFileSync(closedFile, JSON.stringify(data, null, 2), 'utf8');
-          // Clear session
-          const { clearSession } = await import('./store.js');
+          writeFileSync(closedFile, JSON.stringify(data, null, 2), 'utf8');
+          const { clearSession } = require('./store.js');
           clearSession(jid);
         } catch {}
       });
@@ -234,8 +233,6 @@ function startLivechatReplyWorker(sock) {
 }
 
 // ─── Broadcast Worker ────────────────────────────────────
-// Poll broadcast_queue.json setiap 5 detik
-// Kirim pesan/foto/video ke grup WhatsApp (HANYA GRUP, tidak saluran)
 function startBroadcastWorker(sock) {
   if (broadcastInterval) clearInterval(broadcastInterval);
 
@@ -249,24 +246,24 @@ function startBroadcastWorker(sock) {
         const jid = bc.channelJid;
         if (!jid) { await markBroadcastDone(bc.id, 'failed', 'channelJid kosong'); continue; }
 
-        // HANYA PROSES GRUP (bukan newsletter/saluran) - v6.5.0 tidak support saluran
+        // Skip saluran di v6.5.0
         const isNewsletter = jid.endsWith('@newsletter');
         if (isNewsletter) {
-          // Skip saluran di v6.5.0
           await markBroadcastDone(bc.id, 'failed', 'Saluran tidak didukung di v6.5.0');
           logger.warn('BROADCAST', `Broadcast ke saluran dilewati (${jid})`);
           continue;
         }
 
+        const { path: pathModule } = require('path');
         const mediaPath = bc.mediaFilename
-          ? path.join(__dirname, 'data', 'broadcast_media', bc.mediaFilename)
+          ? pathModule.join(__dirname, 'data', 'broadcast_media', bc.mediaFilename)
           : null;
         let mediaBuffer = null;
         let mediaMime = bc.mediaMime || '';
-        if (mediaPath && fs.existsSync(mediaPath)) {
-          mediaBuffer = fs.readFileSync(mediaPath);
+        
+        if (mediaPath && existsSync(mediaPath)) {
+          mediaBuffer = readFileSync(mediaPath);
         } else if (bc.mediaUrl) {
-          // Media dari URL eksternal (mis. foto berita portal) — unduh dulu
           try {
             const r = await axios.get(bc.mediaUrl, {
               responseType: 'arraybuffer', timeout: 25000,
@@ -277,8 +274,6 @@ function startBroadcastWorker(sock) {
             if (r.status === 200 && r.data?.length) {
               mediaBuffer = Buffer.from(r.data);
               mediaMime = (r.headers['content-type'] || mediaMime || 'image/jpeg').split(';')[0].trim();
-            } else {
-              logger.warn('BROADCAST', `Unduh mediaUrl gagal (HTTP ${r.status}), kirim teks saja`);
             }
           } catch (dlErr) {
             logger.warn('BROADCAST', 'Unduh mediaUrl error, kirim teks saja', dlErr.message);
@@ -316,7 +311,6 @@ function startBroadcastWorker(sock) {
         logger.error('BROADCAST', `Gagal broadcast → ${bc.channelJid}`, err.message);
       }
 
-      // Jeda antar kirim agar tidak rate-limit
       await delay(2500);
     }
   }, 5000);
@@ -324,6 +318,7 @@ function startBroadcastWorker(sock) {
   logger.info('BROADCAST', '📢 Broadcast worker aktif (poll setiap 5 detik)');
 }
 
+// ─── Time Helper ─────────────────────────────────────────
 function wibTimeParts() {
   const parts = {};
   for (const { type, value } of new Intl.DateTimeFormat('en-CA', {
@@ -341,9 +336,6 @@ function wibTimeParts() {
 }
 
 // ─── Berita Auto Broadcast ────────────────────────────────
-// Cek berita baru di portal.medan.go.id/berita setiap N menit (atur di dashboard),
-// antrekan broadcast ke GRUP yang dipilih. Riwayat kirim disimpan di Supabase
-// (tabel berita_posted) agar tidak ada berita yang dikirim dua kali.
 function startBeritaScheduler() {
   let busy = false;
   setInterval(async () => {
@@ -352,7 +344,6 @@ function startBeritaScheduler() {
     try { cfg = await getBeritaAutoConfig(); } catch { return; }
     if (!cfg.enabled || !cfg.channelJid) return;
     
-    // Skip jika channelJid adalah saluran (v6.5.0 tidak support)
     if (cfg.channelJid.endsWith('@newsletter')) {
       logger.warn('BERITA', 'Broadcast berita ke saluran dilewati (v6.5.0 tidak support saluran)');
       return;
@@ -375,7 +366,7 @@ function startBeritaScheduler() {
   logger.info('BERITA', '📰 Penjadwal berita otomatis aktif (interval diatur di dashboard)');
 }
 
-/** Antrian teks prakiraan BMKG setiap hari ±00:00 WIB (jendela menit ke-0–12, cek tiap ~40 dtk). */
+// ─── Weather Scheduler ─────────────────────────────────────
 function startWeatherScheduler() {
   let busy = false;
   setInterval(async () => {
@@ -383,7 +374,6 @@ function startWeatherScheduler() {
     const cfg = await getWeatherBroadcastConfig();
     if (!cfg.enabled || !cfg.channelJid) return;
     
-    // Skip jika channelJid adalah saluran (v6.5.0 tidak support)
     if (cfg.channelJid.endsWith('@newsletter')) {
       logger.warn('CUACA', 'Broadcast cuaca ke saluran dilewati (v6.5.0 tidak support saluran)');
       return;
@@ -417,14 +407,14 @@ async function startBot() {
   logger.info('BOOT', 'Inisialisasi sistem bot...');
   await delay(500);
 
-  // Pulihkan auth dari env var jika tersedia (Railway free plan)
+  // Pulihkan auth dari env var
   restoreAuthFromEnv();
 
-  // Load auth state - GANTI KE SINGLE FILE AUTH STATE
+  // Load auth state - SINGLE FILE MODE
   const { state, saveCreds } = await useSingleFileAuthState('./auth_info_baileys/creds.json');
   logger.info('AUTH', 'Auth state dimuat (Single File Mode)');
 
-  // Create WA Socket - HAPUS version parameter, GANTI browser
+  // Create WA Socket
   const sock = makeWASocket({
     logger: pinoLogger,
     printQRInTerminal: false,
@@ -442,24 +432,19 @@ async function startBot() {
   });
 
   // ─── Pairing Code Handler ─────────────────────────────
-  // v6.5.0 menggunakan creds.me bukan creds.registered
   if (!sock.authState.creds.me) {
-    await delay(2000); // Delay penting agar handshake tidak error
+    await delay(2000);
 
     logger.divider();
     logger.info('PAIR', 'Akun belum terdaftar. Memulai proses Pairing Code...');
     logger.divider();
 
-    // Railway / non-interactive: baca dari env var PHONE_NUMBER
-    // Lokal: input manual via terminal
     let phoneNumber;
     if (process.env.PHONE_NUMBER) {
       phoneNumber = process.env.PHONE_NUMBER;
       logger.info('PAIR', `Menggunakan PHONE_NUMBER dari environment: ${phoneNumber}`);
     } else {
-      phoneNumber = await question(
-        '\n📱 Masukkan nomor WhatsApp (format: 628xxxxxxxxxx): '
-      );
+      phoneNumber = await question('\n📱 Masukkan nomor WhatsApp (format: 628xxxxxxxxxx): ');
     }
 
     phoneNumber = phoneNumber.replace(/[^0-9]/g, '');
@@ -470,7 +455,7 @@ async function startBot() {
     logger.info('PAIR', `Nomor yang digunakan: +${phoneNumber}`);
     logger.info('PAIR', 'Meminta pairing code...');
 
-    await delay(3000); // Delay untuk stabilisasi koneksi sebelum request
+    await delay(3000);
 
     try {
       const code = await sock.requestPairingCode(phoneNumber);
@@ -504,7 +489,7 @@ async function startBot() {
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, isOnline } = update;
 
-    // Check for new login (pairing success) - v6.5.0
+    // Check for new login (pairing success)
     if (update.isNewLogin) {
       logger.success('CONNECTED', '🎉 New login! Pairing BERHASIL!');
     }
@@ -526,7 +511,6 @@ async function startBot() {
       startStatusNotifWorker(sock);
       startLivechatReplyWorker(sock);
       startBroadcastWorker(sock);
-      // startNewsletterLookupWorker(sock); - DIPINDANG: v6.5.0 tidak support saluran
     }
 
     if (connection === 'close') {
