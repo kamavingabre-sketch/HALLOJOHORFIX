@@ -2,7 +2,6 @@
   "name": "hallo-johor-bot",
   "version": "1.0.0",
   "description": "WhatsApp Bot Layanan Kecamatan Medan Johor",
-  "type": "module",
   "main": "index.js",
   "scripts": {
     "start": "node start.js",
