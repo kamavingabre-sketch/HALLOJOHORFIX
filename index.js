@@ -456,8 +456,12 @@ async function startBot() {
   // WhatsApp menolak menyelesaikan linking meski kode pairing sudah dimasukkan
   // -> muncul "Couldn't link device" di HP. fetchLatestWaWebVersion() mengambil
   // versi WA Web yang benar-benar aktual. Lihat: WhiskeySockets/Baileys#2679
-  const { version } = await fetchLatestWaWebVersion({});
-  logger.info('VERSION', `WA Web v${version.join('.')}`, '(fetchLatestWaWebVersion)');
+  const { version, isLatest } = await fetchLatestWaWebVersion({});
+  logger.info('VERSION', `WA Web v${version.join('.')}`, `(fetchLatestWaWebVersion) isLatest=${isLatest}`);
+
+  // Debugging version
+  const baileysVersion = await fetchLatestBaileysVersion();
+  logger.warn('DEBUG', `fetchLatestBaileysVersion: ${baileysVersion.version.join('.')}`, `isLatest=${baileysVersion.isLatest}`);
 
   // Create WA Socket
   const sock = makeWASocket({
