@@ -1,16 +1,13 @@
 // ╔══════════════════════════════════════════════════════════╗
 // ║     WhatsApp Bot - Layanan Kecamatan Medan Johor         ║
-// ║     Powered by Baileys + Node.js                         ║
+// ║     Powered by Baileys v6.5.0 (Stable) + Node.js         ║
 // ║     Author: Bot Pelayanan Digital                        ║
 // ╚══════════════════════════════════════════════════════════╝
 
 import makeWASocket, {
-  useMultiFileAuthState,
+  useSingleFileAuthState,
   DisconnectReason,
-  fetchLatestBaileysVersion,
-  fetchLatestWaWebVersion,
-  makeCacheableSignalKeyStore,
-  Browsers
+  makeCacheableSignalKeyStore
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import pino from 'pino';
@@ -236,50 +233,9 @@ function startLivechatReplyWorker(sock) {
   logger.info('LIVECHAT', '💬 LiveChat reply worker aktif (poll setiap 2 detik)');
 }
 
-// ─── Newsletter Lookup Worker ─────────────────────────────
-// Dibaca dari dashboard: file newsletter_lookup_req.json
-// Hasilnya ditulis ke newsletter_lookup_res.json
-function startNewsletterLookupWorker(sock) {
-  const REQ_FILE = './data/newsletter_lookup_req.json';
-  const RES_FILE = './data/newsletter_lookup_res.json';
-
-  setInterval(async () => {
-    if (!fs.existsSync(REQ_FILE)) return;
-    let req;
-    try {
-      req = JSON.parse(fs.readFileSync(REQ_FILE, 'utf8'));
-      fs.unlinkSync(REQ_FILE); // hapus segera agar tidak diproses dua kali
-    } catch { return; }
-
-    if (!req?.code) return;
-    // Abaikan request yang sudah lebih dari 15 detik (sudah timeout di web)
-    if (Date.now() - (req.requestedAt || 0) > 15000) return;
-
-    try {
-      const meta = await sock.newsletterMetadata('invite', req.code);
-      fs.writeFileSync(RES_FILE, JSON.stringify({
-        ok: true,
-        jid: meta.id,
-        name: meta.name || meta.id,
-        description: meta.description || '',
-        subscribers: meta.subscribers || 0,
-      }), 'utf8');
-      logger.success('NEWSLETTER', `Lookup berhasil: ${meta.name} (${meta.id})`);
-    } catch (err) {
-      fs.writeFileSync(RES_FILE, JSON.stringify({
-        ok: false,
-        error: 'Saluran tidak ditemukan atau link sudah kadaluarsa: ' + err.message,
-      }), 'utf8');
-      logger.warn('NEWSLETTER', `Lookup gagal untuk kode: ${req.code}`, err.message);
-    }
-  }, 1000);
-
-  logger.info('NEWSLETTER', '🔍 Newsletter lookup worker aktif');
-}
-
 // ─── Broadcast Worker ────────────────────────────────────
 // Poll broadcast_queue.json setiap 5 detik
-// Kirim pesan/foto/video ke saluran WhatsApp (newsletter / grup)
+// Kirim pesan/foto/video ke grup WhatsApp (HANYA GRUP, tidak saluran)
 function startBroadcastWorker(sock) {
   if (broadcastInterval) clearInterval(broadcastInterval);
 
@@ -293,7 +249,15 @@ function startBroadcastWorker(sock) {
         const jid = bc.channelJid;
         if (!jid) { await markBroadcastDone(bc.id, 'failed', 'channelJid kosong'); continue; }
 
+        // HANYA PROSES GRUP (bukan newsletter/saluran) - v6.5.0 tidak support saluran
         const isNewsletter = jid.endsWith('@newsletter');
+        if (isNewsletter) {
+          // Skip saluran di v6.5.0
+          await markBroadcastDone(bc.id, 'failed', 'Saluran tidak didukung di v6.5.0');
+          logger.warn('BROADCAST', `Broadcast ke saluran dilewati (${jid})`);
+          continue;
+        }
+
         const mediaPath = bc.mediaFilename
           ? path.join(__dirname, 'data', 'broadcast_media', bc.mediaFilename)
           : null;
@@ -322,7 +286,6 @@ function startBroadcastWorker(sock) {
         }
         const hasMedia = !!mediaBuffer;
 
-        // Saluran (@newsletter) dan grup: Baileys memakai sendMessage; relayMessage mengode plaintext untuk newsletter.
         const sendFn = (payload) => sock.sendMessage(jid, payload);
 
         if (hasMedia) {
@@ -334,14 +297,9 @@ function startBroadcastWorker(sock) {
               await sendFn({ image: mediaBuffer, caption: bc.pesan || '', mimetype: mediaMime || 'image/jpeg' });
             }
           } catch (mediaErr) {
-            if (isNewsletter) {
-              // Fallback ke teks saja — bug Baileys: media newsletter pakai CDN path berbeda (/o1/ vs /m1/)
-              logger.warn('BROADCAST', `Media ke newsletter gagal, fallback ke teks`, mediaErr.message);
-              const fallbackText = [bc.pesan, '_(Foto/video tidak dapat dikirim ke saluran saat ini)_'].filter(Boolean).join('\n');
-              await sock.sendMessage(jid, { text: fallbackText });
-            } else {
-              throw mediaErr;
-            }
+            logger.warn('BROADCAST', `Media gagal, fallback ke teks`, mediaErr.message);
+            const fallbackText = [bc.pesan, '_(Foto/video tidak dapat dikirim)_'].filter(Boolean).join('\n');
+            await sock.sendMessage(jid, { text: fallbackText });
           }
         } else if (bc.pesan) {
           await sendFn({ text: bc.pesan });
@@ -351,7 +309,7 @@ function startBroadcastWorker(sock) {
         }
 
         await markBroadcastDone(bc.id, 'sent');
-        logger.success('BROADCAST', `Broadcast terkirim → ${jid} ${isNewsletter ? '[newsletter]' : '[grup]'}`, bc.pesan?.substring(0, 40) || `[${mediaMime}]`);
+        logger.success('BROADCAST', `Broadcast terkirim → ${jid} [grup]`, bc.pesan?.substring(0, 40) || `[${mediaMime}]`);
 
       } catch (err) {
         await markBroadcastDone(bc.id, 'failed', err.message);
@@ -384,7 +342,7 @@ function wibTimeParts() {
 
 // ─── Berita Auto Broadcast ────────────────────────────────
 // Cek berita baru di portal.medan.go.id/berita setiap N menit (atur di dashboard),
-// antrekan broadcast ke saluran yang dipilih. Riwayat kirim disimpan di Supabase
+// antrekan broadcast ke GRUP yang dipilih. Riwayat kirim disimpan di Supabase
 // (tabel berita_posted) agar tidak ada berita yang dikirim dua kali.
 function startBeritaScheduler() {
   let busy = false;
@@ -393,6 +351,13 @@ function startBeritaScheduler() {
     let cfg;
     try { cfg = await getBeritaAutoConfig(); } catch { return; }
     if (!cfg.enabled || !cfg.channelJid) return;
+    
+    // Skip jika channelJid adalah saluran (v6.5.0 tidak support)
+    if (cfg.channelJid.endsWith('@newsletter')) {
+      logger.warn('BERITA', 'Broadcast berita ke saluran dilewati (v6.5.0 tidak support saluran)');
+      return;
+    }
+    
     const intervalMs = (cfg.intervalMinutes || 30) * 60_000;
     if (cfg.lastCheckAt && Date.now() - new Date(cfg.lastCheckAt).getTime() < intervalMs) return;
     busy = true;
@@ -417,6 +382,13 @@ function startWeatherScheduler() {
     if (busy) return;
     const cfg = await getWeatherBroadcastConfig();
     if (!cfg.enabled || !cfg.channelJid) return;
+    
+    // Skip jika channelJid adalah saluran (v6.5.0 tidak support)
+    if (cfg.channelJid.endsWith('@newsletter')) {
+      logger.warn('CUACA', 'Broadcast cuaca ke saluran dilewati (v6.5.0 tidak support saluran)');
+      return;
+    }
+    
     const p = wibTimeParts();
     const ymd = `${p.year}-${p.month}-${p.day}`;
     if (cfg.lastSentDate === ymd) return;
@@ -448,32 +420,19 @@ async function startBot() {
   // Pulihkan auth dari env var jika tersedia (Railway free plan)
   restoreAuthFromEnv();
 
-  // Load auth state
-  const { state, saveCreds } = await useMultiFileAuthState(CONFIG.AUTH_DIR);
-  logger.info('AUTH', 'Auth state dimuat', CONFIG.AUTH_DIR);
+  // Load auth state - GANTI KE SINGLE FILE AUTH STATE
+  const { state, saveCreds } = await useSingleFileAuthState('./auth_info_baileys/creds.json');
+  logger.info('AUTH', 'Auth state dimuat (Single File Mode)');
 
-  // Fetch latest WA Web version (fetchLatestBaileysVersion() bisa mengembalikan
-  // versi basi meski isLatest:true di beberapa rilis rc13, yang menyebabkan
-  // WhatsApp menolak menyelesaikan linking meski kode pairing sudah dimasukkan
-  // -> muncul "Couldn't link device" di HP. fetchLatestWaWebVersion() mengambil
-  // versi WA Web yang benar-benar aktual. Lihat: WhiskeySockets/Baileys#2679
-  const { version, isLatest } = await fetchLatestWaWebVersion({});
-  logger.info('VERSION', `WA Web v${version.join('.')}`, `(fetchLatestWaWebVersion) isLatest=${isLatest}`);
-
-  // Debugging version
-  const baileysVersion = await fetchLatestBaileysVersion();
-  logger.warn('DEBUG', `fetchLatestBaileysVersion: ${baileysVersion.version.join('.')}`, `isLatest=${baileysVersion.isLatest}`);
-
-  // Create WA Socket
+  // Create WA Socket - HAPUS version parameter, GANTI browser
   const sock = makeWASocket({
-    version,
     logger: pinoLogger,
     printQRInTerminal: false,
     auth: {
       creds: state.creds,
       keys: makeCacheableSignalKeyStore(state.keys, pinoLogger),
     },
-    browser: Browsers.macOS('Desktop'),
+    browser: ['HalloJohorBot', 'Chrome', '1.0.0'],
     syncFullHistory: false,
     markOnlineOnConnect: true,
     generateHighQualityLinkPreview: false,
@@ -483,7 +442,8 @@ async function startBot() {
   });
 
   // ─── Pairing Code Handler ─────────────────────────────
-  if (!sock.authState.creds.registered) {
+  // v6.5.0 menggunakan creds.me bukan creds.registered
+  if (!sock.authState.creds.me) {
     await delay(2000); // Delay penting agar handshake tidak error
 
     logger.divider();
@@ -544,6 +504,11 @@ async function startBot() {
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, isOnline } = update;
 
+    // Check for new login (pairing success) - v6.5.0
+    if (update.isNewLogin) {
+      logger.success('CONNECTED', '🎉 New login! Pairing BERHASIL!');
+    }
+
     if (connection === 'connecting') {
       logger.state('CONNECTING', 'Menghubungkan ke server WhatsApp...');
     }
@@ -561,7 +526,7 @@ async function startBot() {
       startStatusNotifWorker(sock);
       startLivechatReplyWorker(sock);
       startBroadcastWorker(sock);
-      startNewsletterLookupWorker(sock);
+      // startNewsletterLookupWorker(sock); - DIPINDANG: v6.5.0 tidak support saluran
     }
 
     if (connection === 'close') {
