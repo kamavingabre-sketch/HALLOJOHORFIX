@@ -7,6 +7,7 @@
 import makeWASocket, {
   useMultiFileAuthState,
   DisconnectReason,
+  fetchLatestBaileysVersion,
   fetchLatestWaWebVersion,
   makeCacheableSignalKeyStore,
   Browsers
